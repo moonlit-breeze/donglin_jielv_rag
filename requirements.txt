@@ -1,0 +1,10 @@
+openai>=1.0.0
+python-dotenv
+langchain>=0.2.0
+langchain-community
+langchain-text-splitters
+langchain-core
+langchain-huggingface
+sentence-transformers
+chromadb
+rich
