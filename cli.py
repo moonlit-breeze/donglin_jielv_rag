@@ -80,4 +80,6 @@ while True:
         console.print(f"[red]生成回答时出错：{e}[/red]")
         continue
 
-    console.print("\n" + (answer or "（模型未返回内容）") + "\n")
+    # 自动追加免责声明
+    disclaimer = "\n\n[dim]— 内容仅供参考，以丛林规约为准。[/dim]"
+    console.print("\n" + (answer or "（模型未返回内容）") + disclaimer + "\n")

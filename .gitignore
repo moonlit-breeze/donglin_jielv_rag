@@ -6,3 +6,4 @@ vector_db/
 chroma_db/
 venv/
 models/
+.qoder/

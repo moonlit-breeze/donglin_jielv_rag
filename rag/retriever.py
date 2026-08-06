@@ -9,12 +9,20 @@ retriever.py — 语义检索模块
 
 from rag.vector_store import load_vectorstore
 
-db = load_vectorstore()
+_db = None
+
+def _get_db():
+    """懒加载向量数据库，首次调用时才加载模型权重"""
+    global _db
+    if _db is None:
+        _db = load_vectorstore()
+    return _db
 
 def retrieve(question: str, role_filter: str = None, k: int = 3):
     """
     role_filter: "居士戒" / "沙弥戒" / "比丘戒"
     """
+    db = _get_db()
     if role_filter:
         results = db.similarity_search(
             question,
