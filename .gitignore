@@ -7,3 +7,4 @@ chroma_db/
 venv/
 models/
 .qoder/
+install.log
