@@ -8,8 +8,8 @@ console = Console()
 # 超过该长度的提问触发成本/质量警告（DeepSeek API 按 token 计费）
 MAX_QUESTION_CHARS = 300
 
-console.print("[bold cyan]东林戒律问答系统[/bold cyan]")
-console.print("输入身份：1-居士 2-沙弥 3-比丘，或回车不限")
+console.print("[bold cyan]佛学戒律问答系统[/bold cyan]")
+console.print("输入身份：1-居士 2-沙弥 3-比丘，回车=全部检索")
 console.print("输入 exit 退出\n")
 
 while True:
@@ -56,7 +56,10 @@ while True:
         continue
 
     if not docs:
-        console.print("[red]未检索到相关戒律条文[/red]")
+        console.print(
+            "[red]未检索到相关戒律条文。[/red]\n"
+            "[dim]该问题可能超出戒律知识库范围，或相关度不足已被过滤。[/dim]"
+        )
         continue
 
     try:

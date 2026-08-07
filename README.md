@@ -1,4 +1,4 @@
-# 东林戒律 RAG 问答系统
+# 佛学戒律 RAG 问答系统
 
 基于 **RAG（Retrieval-Augmented Generation）** 技术的佛教戒律智能问答系统。
 
