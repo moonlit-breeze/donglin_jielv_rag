@@ -32,10 +32,11 @@ SYSTEM_PROMPT = """你是一位严谨的佛教戒律助手，仅回答与佛教�
 不得从戒律资料中牵强附会地回答。
 
 【回答原则】
-1. 必须区分戒条的适用条件：该戒针对谁（已受戒者 / 未受戒者、居士 / 沙弥 / 比丘）？
-2. 必须区分戒条性质：性戒（根本戒）与遮戒（防范戒）的约束力度不同，遮戒对未受戒者不构成约束。
-3. 若参考资料中包含开许、例外、不同层次的说明（如「未受戒者无罪过」「方便说」等），必须完整体现，不得省略。
-4. 不得将「已受戒者的戒条要求」笼统地回答为所有人都必须遵守。
+1. 当前用户身份为「{role}」。回答时必须仅围绕该身份的戒条展开，不得主动介绍其他身份（如居士、沙弥）的持犯情况，除非参考资料中明确提到。
+2. 若用户身份为「未指定」或「不限」，则在回答中区分不同身份的适用条件（居士 / 沙弥 / 比丘），不得将某一身份的戒条笼统推广到所有人。
+3. 必须区分戒条性质：性戒（根本戒）与遮戒（防范戒）的约束力度不同，遮戒对未受戒者不构成约束。
+4. 若参考资料中包含开许、例外、不同层次的说明（如「未受戒者无罪过」「方便说」等），必须完整体现，不得省略。
+5. 不得将「已受戒者的戒条要求」笼统地回答为所有人都必须遵守。
 
 【回答格式】
 【答】
@@ -62,14 +63,41 @@ def format_context(docs):
         parts.append(f"{source_label}{doc.page_content}{source_ref}")
     return "\n\n".join(parts)
 
-def generate(question: str, docs):
+# 简单停用词集合，用于主题相关性校验
+_STOPWORDS = set("的 是 了 在 和 与 或 可以 能 吗 呢 吧 啊 我 你 他 她 它 们 这 那 有 个 为 之 而 以 及 其 该 请 问 如何 什么 哪些 怎么 吗 不 要 会 都 就 都 也 很 但 吗 么 呢 吧".split())
+
+def is_retrieval_relevant(question: str, docs) -> bool:
+    """
+    简单校验检索结果是否与问题主题相关。
+    若问题中的有效用字在参考资料中完全没有出现，认为检索失效。
+    """
+    q_chars = set(question) - _STOPWORDS
+    if not q_chars:
+        return True  # 无法判断，默认通过
+
+    for doc in docs:
+        content_chars = set(doc.page_content)
+        if q_chars & content_chars:
+            return True
+    return False
+
+def generate(question: str, docs, role: str = ""):
+    # 若用户指定了具体身份，但检索结果与问题明显不相关，
+    # 则清空误导性资料，允许模型从权威经典兜底回答，但仍紧扣当前身份。
+    fallback_note = ""
+    if role and role not in ("不限", "未指定") and not is_retrieval_relevant(question, docs):
+        docs = []
+        fallback_note = "（知识库未检索到与问题直接相关的内容，请依据你确知的权威佛教戒律知识谨慎回答，并紧扣上述身份。）"
+
     context = format_context(docs)
-    user_msg = f"参考资料：\n{context}\n\n问题：{question}"
+    # 将身份占位符替换为实际身份，强化身份聚焦
+    system_prompt = SYSTEM_PROMPT.format(role=role or "未指定")
+    user_msg = f"用户身份：{role or '未指定'}\n\n参考资料：\n{context}\n{fallback_note}\n\n问题：{question}"
 
     resp = client.chat.completions.create(
         model="deepseek-chat",
         messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_msg}
         ],
         temperature=0.1,

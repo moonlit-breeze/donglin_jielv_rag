@@ -5,7 +5,7 @@
 """
 import gradio as gr
 from rag.retriever import retrieve
-from rag.generator import generate
+from rag.generator import generate, is_retrieval_relevant
 
 # 身份选项
 ROLE_OPTIONS = ["不限", "居士戒", "沙弥戒", "比丘戒"]
@@ -24,10 +24,15 @@ def answer(question: str, role: str, top_k: int):
     if not docs:
         return "未在戒律资料中找到相关内容。"
 
-    # 生成
-    answer_text = generate(question, docs)
+    # 生成，传入当前身份以聚焦回答范围
+    answer_text = generate(question, docs, role=role)
 
     # 额外展示检索到的原文（透明化，增加信任感）
+    # 若检索结果与问题不相关，则处于权威经典兜底模式，不展示误导性原文
+    show_sources = (role in ("不限",)) or is_retrieval_relevant(question, docs)
+    if not show_sources:
+        return answer_text + "\n\n---\n\n*知识库未检索到直接相关内容，本次回答来自权威经典兜底。*"
+
     sources = "\n\n---\n\n**📚 检索到的原文：**\n"
     for i, doc in enumerate(docs):
         meta = doc.metadata

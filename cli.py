@@ -63,7 +63,7 @@ while True:
         continue
 
     try:
-        answer = generate(question, docs)
+        answer = generate(question, docs, role=role_filter or "未指定")
     except KeyboardInterrupt:
         console.print("\n[red]已取消本次请求[/red]")
         continue
