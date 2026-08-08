@@ -1,7 +1,7 @@
 """
 初始化向量数据库。
 
-从 knowledge_base.json 加载结构化数据，按身份分层建库。
+从 data/knowledge_base.json 加载结构化数据，按身份分层建库。
 "通用"条目（如戒律总览、佛教戒律传承）会被写入所有身份库，
 确保任何身份下都能检索到通用知识。
 """
@@ -16,7 +16,7 @@ from rag.loader import load_knowledge_base
 from rag.vector_store import create_vectorstore_for_role, ROLE_DB_MAP
 
 if __name__ == "__main__":
-    print("正在加载 knowledge_base.json ...")
+    print("正在加载 data/knowledge_base.json ...")
     docs = load_knowledge_base()
     print(f"共加载 {len(docs)} 条知识条目")
 
