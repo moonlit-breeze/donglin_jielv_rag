@@ -56,6 +56,15 @@ while True:
         continue
 
     if not docs:
+        if role_filter:
+            # 指定了身份但知识库未命中，允许权威经典兜底
+            try:
+                answer = generate(question, [], role=role_filter)
+                console.print("\n" + answer + "\n")
+                console.print("[dim]— 知识库未检索到直接相关内容，本次回答来自权威经典兜底。[/dim]\n")
+            except Exception as e:
+                console.print(f"[red]生成回答时出错：{e}[/red]")
+            continue
         console.print(
             "[red]未检索到相关戒律条文。[/red]\n"
             "[dim]该问题可能超出戒律知识库范围，或相关度不足已被过滤。[/dim]"

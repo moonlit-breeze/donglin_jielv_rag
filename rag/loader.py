@@ -29,6 +29,7 @@ def load_knowledge_base(file_path: str = "data/knowledge_base.json"):
                 "domain": DOMAIN,
                 "source": entry.get("source", ""),
                 "category": entry.get("category", ""),
+                "severity": entry.get("severity", "未标注"),
                 "index": idx,
             }
         )
