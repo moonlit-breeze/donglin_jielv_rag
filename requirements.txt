@@ -5,6 +5,7 @@ langchain-core
 langchain-huggingface
 langchain-chroma
 sentence-transformers
+FlagEmbedding
 chromadb
 rich
 gradio

@@ -8,3 +8,4 @@ venv/
 models/
 .qoder/
 install.log
+logs/

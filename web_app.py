@@ -71,7 +71,7 @@ def _check_access_token(token: str) -> bool:
     return token == ACCESS_TOKEN
 
 
-def respond(message: str, history: list, role: str, top_k: int, detail_level: str, json_mode: bool, access_token: str, state_dict: dict):
+def respond(message: str, history: list, role: str, top_k: int, detail_level: str, json_mode: bool, rerank: bool, access_token: str, state_dict: dict):
     """Gradio ChatInterface 的回调函数（带对话状态管理）"""
     if not message.strip():
         return "请输入问题"
@@ -97,8 +97,8 @@ def respond(message: str, history: list, role: str, top_k: int, detail_level: st
     if not ok:
         return reason
 
-    # 初始身份由下拉框决定
-    if state.turn_count == 1 and role and role != "不限":
+    # 下拉框身份优先：用户每次显式选择身份时，都更新当前身份
+    if role and role != "不限":
         state.current_role = role
 
     # 构造带状态感知的完整问题
@@ -108,7 +108,7 @@ def respond(message: str, history: list, role: str, top_k: int, detail_level: st
     role_filter = None if state.current_role == "未指定" else state.current_role
 
     # 检索
-    docs = retrieve(full_question, role_filter=role_filter, k=top_k)
+    docs = retrieve(full_question, role_filter=role_filter, k=top_k, rerank=rerank)
 
     # 空检索时，若选了具体身份则走权威经典兜底
     if not docs:
@@ -186,7 +186,7 @@ def submit_feedback(question, answer, feedback, note):
 
 
 # ---------- Gradio 多轮对话界面 ----------
-with gr.Blocks(title="东林戒律RAG问答", theme=gr.themes.Soft()) as demo:
+with gr.Blocks(title="东林戒律RAG问答") as demo:
     gr.Markdown("""
     # 🪷 佛学戒律智能问答
     *基于RAG技术，严格依据戒律原文回答，不编造。*
@@ -214,6 +214,10 @@ with gr.Blocks(title="东林戒律RAG问答", theme=gr.themes.Soft()) as demo:
             label="结构化输出（JSON）",
             value=False
         )
+        rerank_input = gr.Checkbox(
+            label="启用精排（Reranker）",
+            value=False
+        )
 
     conv_state = gr.State({})
     access_token_input = gr.Textbox(
@@ -225,14 +229,9 @@ with gr.Blocks(title="东林戒律RAG问答", theme=gr.themes.Soft()) as demo:
 
     chatbot = gr.ChatInterface(
         fn=respond,
-        additional_inputs=[role_input, topk_input, detail_input, json_mode_input, access_token_input, conv_state],
+        additional_inputs=[role_input, topk_input, detail_input, json_mode_input, rerank_input, access_token_input, conv_state],
         title="",
         description="请输入您的戒律问题，支持多轮追问。",
-        examples=[
-            "居士可以喝酒吗？",
-            "比丘穿什么衣服？",
-            "沙弥可以持金钱吗？",
-        ],
     )
 
     # 反馈区域
@@ -258,5 +257,6 @@ if __name__ == "__main__":
     demo.launch(
         server_name="127.0.0.1",  # 默认仅本机访问，更安全
         server_port=7860,
-        share=False  # 设True可生成公网临时链接
+        share=False,  # 设True可生成公网临时链接
+        theme=gr.themes.Soft()
     )

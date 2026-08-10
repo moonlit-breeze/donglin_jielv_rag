@@ -111,6 +111,38 @@ def is_topic_switch(message: str) -> bool:
     return False
 
 
+def _parse_history_item(item):
+    """
+    兼容不同 Gradio 版本的 history 条目格式。
+    支持：
+      - [user_msg, bot_msg] 元组/列表
+      - {"role": "user" / "assistant", "content": "..."} 字典
+      - ChatMessage 对象
+    返回 (user_msg, bot_msg) 或 (None, None)
+    """
+    if isinstance(item, (list, tuple)) and len(item) == 2:
+        return str(item[0]), str(item[1])
+
+    if isinstance(item, dict):
+        role = item.get("role", "")
+        content = item.get("content", "")
+        if role == "user":
+            return content, None
+        if role == "assistant":
+            return None, content
+        return None, None
+
+    # ChatMessage 对象：有 role 和 content 属性
+    role = getattr(item, "role", "")
+    content = getattr(item, "content", "")
+    if role == "user":
+        return content, None
+    if role == "assistant":
+        return None, content
+
+    return None, None
+
+
 def build_question_with_state(message: str, history: list, state: ConversationState) -> str:
     """
     根据对话状态构造提交给模型的完整问题。
@@ -129,11 +161,23 @@ def build_question_with_state(message: str, history: list, state: ConversationSt
 
     # 构造上下文：最多取最近 2 轮，且对上一轮做摘要
     context_lines = []
-    recent = history[-2:] if len(history) >= 2 else history
-    for idx, (user_msg, bot_msg) in enumerate(recent, start=1):
+    recent = history[-4:] if len(history) >= 4 else history  # 取最近 4 条消息（2轮）
+
+    # 把 history 整理成轮次对
+    pairs = []
+    current_user = None
+    for item in recent:
+        user_msg, bot_msg = _parse_history_item(item)
+        if user_msg is not None:
+            current_user = user_msg
+        if bot_msg is not None and current_user is not None:
+            pairs.append((current_user, bot_msg))
+            current_user = None
+
+    for idx, (user_msg, bot_msg) in enumerate(pairs[-2:], start=1):
         context_lines.append(f"第{idx}轮问：{user_msg}")
         # 对回答做摘要：取前 120 字，避免过长
-        summary = bot_msg[:120].replace("\n", " ")
+        summary = str(bot_msg)[:120].replace("\n", " ")
         context_lines.append(f"第{idx}轮答：{summary}...")
 
     parts = []
