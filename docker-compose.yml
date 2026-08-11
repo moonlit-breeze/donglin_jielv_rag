@@ -1,0 +1,39 @@
+# ============================================================
+# docker-compose.yml — 一键部署戒律 RAG 系统
+# ============================================================
+# 启动：docker-compose up
+# 后台：docker-compose up -d
+# 停止：docker-compose down
+# ============================================================
+
+version: "3.8"
+
+services:
+  jielv-rag:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: jielv-rag
+    ports:
+      - "7860:7860"
+    env_file:
+      - .env
+    environment:
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
+      - HF_HUB_DISABLE_TELEMETRY=1
+      - PYTHONUNBUFFERED=1
+    volumes:
+      # 持久化向量数据库（重建容器时不丢失）
+      - ./chroma_db:/app/chroma_db
+      # 持久化日志和反馈数据
+      - ./logs:/app/logs
+      - ./data:/app/data
+    restart: unless-stopped
+    # 资源限制（可根据机器配置调整）
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+        reservations:
+          memory: 2G

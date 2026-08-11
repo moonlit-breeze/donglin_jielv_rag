@@ -1,0 +1,23 @@
+# Docker 构建排除文件
+__pycache__/
+*.pyc
+*.pyo
+.git/
+.gitignore
+.qoder/
+venv/
+.env
+.env.example
+README.md
+*.log
+temp_*.txt
+temp_*.log
+
+# 向量数据库（太大，通过 volume 挂载）
+chroma_db/
+
+# 模型文件（太大，通过 volume 挂载或预下载）
+models/
+
+# 测试文件（不需要在容器中运行）
+tests/
