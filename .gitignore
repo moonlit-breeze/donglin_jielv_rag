@@ -11,3 +11,4 @@ install.log
 logs/
 *.bak
 temp_*.py
+REVIEW.md
