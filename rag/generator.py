@@ -23,6 +23,7 @@ generator.py — 答案生成模块
 
 from dotenv import load_dotenv
 import os
+import re
 import json
 from typing import List, Dict, Iterator, Optional
 
@@ -281,8 +282,19 @@ def _add_confidence_marker(answer: str, confidence: str) -> str:
     }
     marker = marker_map.get(confidence, "")
     if marker:
-        return answer + f"\n\n---\n\n*置信度：{marker}*"
+        return answer + f"\n\n*📊 置信度：{marker}*"
     return answer
+
+
+# 匹配 LLM 可能自行输出的置信度文本（防止与系统追加的置信度重复）
+_CONFIDENCE_RE = re.compile(
+    r'\n*(?:---\s*\n*)?(?:\*{0,2})?置信度[：:]\s*[^\n]*(?:\*{0,2})?\s*$',
+    re.MULTILINE
+)
+
+def _strip_llm_confidence(text: str) -> str:
+    """剥离 LLM 自行输出的置信度文本，避免与系统追加的置信度重复。"""
+    return _CONFIDENCE_RE.sub('', text).rstrip()
 
 
 def _try_parse_json(answer: str):
@@ -385,6 +397,8 @@ def generate(question: str, docs, role: str = "", detail_level: str = "标准",
     # ============================================================
     # Step 5: 追加置信度标识并返回
     # ============================================================
+    # 先剥离 LLM 可能自行输出的置信度文本，再追加系统的置信度标识
+    answer = _strip_llm_confidence(answer)
     return _add_confidence_marker(answer, confidence)
 
 
@@ -442,5 +456,6 @@ def generate_stream(question: str, docs, role: str = "", detail_level: str = "�
         yield accumulated + f"\n\n[生成中断：{e}]"
         return
 
-    # 追加置信度标识
+    # 追加置信度标识（先剥离 LLM 可能自行输出的置信度文本）
+    accumulated = _strip_llm_confidence(accumulated)
     yield _add_confidence_marker(accumulated, confidence)
