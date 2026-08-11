@@ -199,6 +199,7 @@ def respond(message: str, history: list, role: str, top_k: int, detail_level: st
 
     # 恢复对话状态
     state = ConversationState.from_dict(state_dict) if state_dict else ConversationState()
+    prev_role = state.current_role
     state.turn_count += 1
 
     if not _check_session_rate_limit(state):
@@ -211,9 +212,16 @@ def respond(message: str, history: list, role: str, top_k: int, detail_level: st
         yield reason
         return
 
-    # 下拉框身份优先
+    # 下拉框身份优先：下拉框是用户意图的权威来源
     if role and role != "不限":
         state.current_role = role
+    else:
+        # 用户选择"不限"时重置身份，避免残留旧身份
+        state.current_role = "未指定"
+
+    # 调试日志：帮助排查身份切换问题
+    if prev_role != state.current_role:
+        print(f"[身份切换] {prev_role} → {state.current_role}（下拉框值: {role}）")
 
     # 构造带状态感知的完整问题
     full_question = build_question_with_state(message, history, state)
@@ -257,18 +265,23 @@ def respond(message: str, history: list, role: str, top_k: int, detail_level: st
     # 检索到的原文（仅相关时展示）
     sources_text = ""
     if show_sources:
-        sources_text = "\n\n---\n\n**📚 检索到的原文：**\n"
+        # 用 HTML <details> 做折叠，默认收起，用户可点击展开
+        sources_text = '\n\n---\n\n<details>\n<summary><strong>📚 检索到的原文（点击展开）</strong></summary>\n\n'
         for i, doc in enumerate(docs):
             meta = doc.metadata
-            sources_text += f"\n**[{i+1}] {meta.get('source','?')} · {meta.get('role','?')}**\n"
-            sources_text += f"> {doc.page_content[:200]}\n"
+            sources_text += f"**[{i+1}] {meta.get('source','?')} · {meta.get('role','?')}**\n"
+            sources_text += f"> {doc.page_content[:200]}\n\n"
+        sources_text += '</details>'
 
     # 生成
     # JSON 模式强制非流式：流式返回原始文本，无法做友好格式化
     use_stream = streaming and not json_mode
     if use_stream:
+        # 流式输出：先逐 token yield 回答，最后再追加来源原文
         for partial in generate_stream(full_question, docs, role=state.current_role, detail_level=detail_level, json_mode=json_mode, deep_think=deep_think, chat_history=chat_history):
-            yield partial + fallback_suffix + sources_text
+            yield partial + fallback_suffix
+        # 流式结束后追加来源原文（只出现一次）
+        yield partial + fallback_suffix + sources_text
     else:
         result = generate(full_question, docs, role=state.current_role, detail_level=detail_level, json_mode=json_mode, deep_think=deep_think, chat_history=chat_history)
         final_answer = _format_answer(result, json_mode) + fallback_suffix + sources_text
@@ -381,8 +394,9 @@ with gr.Blocks(title="东林戒律RAG问答") as demo:
         visible=bool(ACCESS_TOKEN)
     )
 
-    chatbot = gr.ChatInterface(
+    chat_interface = gr.ChatInterface(
         fn=respond,
+        chatbot=gr.Chatbot(sanitize_html=False),  # 允许 <details> 等 HTML 标签渲染
         additional_inputs=[role_input, topk_input, detail_input, json_mode_input, rerank_input, deep_think_input, rewrite_input, streaming_input, access_token_input, conv_state],
         title="",
         description="请输入您的戒律问题，支持多轮追问。",
