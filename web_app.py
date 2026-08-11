@@ -232,7 +232,8 @@ def respond(message: str, history: list, role: str, top_k: int, detail_level: st
         if state.current_role and state.current_role != "未指定":
             fallback_suffix = "\n\n---\n\n*知识库未检索到直接相关内容，本次回答来自权威经典兜底。*"
             state.fallback_count += 1
-            if streaming:
+            use_stream = streaming and not json_mode
+            if use_stream:
                 for partial in generate_stream(full_question, [], role=state.current_role, detail_level=detail_level, json_mode=json_mode, deep_think=deep_think, chat_history=chat_history):
                     yield partial + fallback_suffix
             else:
@@ -263,7 +264,9 @@ def respond(message: str, history: list, role: str, top_k: int, detail_level: st
             sources_text += f"> {doc.page_content[:200]}\n"
 
     # 生成
-    if streaming:
+    # JSON 模式强制非流式：流式返回原始文本，无法做友好格式化
+    use_stream = streaming and not json_mode
+    if use_stream:
         for partial in generate_stream(full_question, docs, role=state.current_role, detail_level=detail_level, json_mode=json_mode, deep_think=deep_think, chat_history=chat_history):
             yield partial + fallback_suffix + sources_text
     else:
