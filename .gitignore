@@ -9,3 +9,5 @@ models/
 .qoder/
 install.log
 logs/
+*.bak
+temp_*.py
