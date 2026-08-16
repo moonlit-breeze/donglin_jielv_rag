@@ -23,6 +23,34 @@ from typing import Dict, Any
 # 所有支持的身份
 ALL_ROLES = {"居士戒", "沙弥戒", "比丘戒", "比丘尼戒", "通用"}
 
+# 身份分层体系：主身份 -> 允许的细分身份
+# 用于判断用户提问是否"超纲"，以及细化检索范围
+ROLE_HIERARCHY = {
+    "居士戒": ["五戒", "八关斋戒", "菩萨戒·十重", "菩萨戒·六重"],
+    "沙弥戒": ["十戒"],
+    "比丘戒": ["具足戒"],
+    "比丘尼戒": ["具足戒"],
+    "通用": [],
+}
+
+# 细分身份别名：从用户口语中识别 sub_role
+SUB_ROLE_ALIASES = {
+    "五戒": ["五戒"],
+    "八关斋戒": ["八关斋戒", "八关斋", "八戒"],
+    "菩萨戒·十重": ["十重戒", "十重", "梵网经", "梵网"],
+    "菩萨戒·六重": ["六重戒", "六重", "优婆塞戒经", "优婆塞"],
+    "十戒": ["十戒", "沙弥十戒"],
+    "具足戒": ["具足戒", "大戒", "比丘戒", "比丘尼戒"],
+}
+
+# 身份别名（用于越界检测）
+ROLE_ALIASES = {
+    "比丘戒": ["比丘", "比丘戒", "大比丘"],
+    "沙弥戒": ["沙弥", "沙弥戒"],
+    "居士戒": ["居士", "居士戒", "在家居士"],
+    "比丘尼戒": ["比丘尼", "比丘尼戒", "尼师"],
+}
+
 # 追问/切换话题的常见模式
 FOLLOW_UP_PATTERNS = [
     r"那(?:个|么|我)?(.+?)(?:呢|怎么样|如何)",
@@ -46,6 +74,7 @@ class ConversationState:
 
     def __init__(self):
         self.current_role: str = "未指定"
+        self.current_sub_role: str = ""   # 细分身份（如五戒/菩萨戒·十重）
         self.current_topic: str = ""
         self.fallback_count: int = 0
         self.turn_count: int = 0
@@ -56,6 +85,7 @@ class ConversationState:
     def to_dict(self) -> Dict[str, Any]:
         return {
             "current_role": self.current_role,
+            "current_sub_role": self.current_sub_role,
             "current_topic": self.current_topic,
             "fallback_count": self.fallback_count,
             "turn_count": self.turn_count,
@@ -68,6 +98,7 @@ class ConversationState:
     def from_dict(cls, data: Dict[str, Any]):
         state = cls()
         state.current_role = data.get("current_role", "未指定")
+        state.current_sub_role = data.get("current_sub_role", "")
         state.current_topic = data.get("current_topic", "")
         state.fallback_count = data.get("fallback_count", 0)
         state.turn_count = data.get("turn_count", 0)
@@ -95,17 +126,67 @@ def detect_role_switch(message: str, current_role: str) -> str:
             return role
 
     # 简称映射
-    aliases = {
-        "比丘": "比丘戒",
-        "沙弥": "沙弥戒",
-        "居士": "居士戒",
-        "比丘尼": "比丘尼戒",
-    }
-    for alias, role in aliases.items():
-        if alias in message:
-            return role
+    for role, aliases in ROLE_ALIASES.items():
+        for alias_word in aliases:
+            if alias_word in message:
+                return role
 
     return current_role
+
+
+def detect_sub_role(message: str, current_role: str = "") -> str:
+    """
+    从问题中识别细分身份（sub_role）。
+
+    例如：
+    - "居士持十重戒要注意什么" → "菩萨戒·十重"
+    - "八关斋戒能唱歌吗" → "八关斋戒"
+
+    只在识别到的 sub_role 属于当前主身份时才返回，否则返回空。
+    """
+    detected = ""
+    for sub_role, aliases in SUB_ROLE_ALIASES.items():
+        for alias in aliases:
+            if alias in message:
+                detected = sub_role
+                break
+        if detected:
+            break
+
+    if not detected:
+        return ""
+
+    # 如果当前主身份为空或未指定，直接返回识别结果
+    if not current_role or current_role == "未指定":
+        return detected
+
+    # 只接受当前主身份下的细分身份
+    allowed = ROLE_HIERARCHY.get(current_role, [])
+    if detected in allowed:
+        return detected
+
+    return ""
+
+
+def is_within_role_scope(question_role: str, user_role: str) -> bool:
+    """
+    判断用户的问题是否在其身份范围内。
+
+    规则：
+    - 用户未指定身份 或 选择"不限" → 允许任何身份
+    - 问题身份为空 或 "通用" → 允许
+    - 问题身份与用户身份相同 → 允许
+    - 问题身份与用户身份不同 → 越界
+
+    例如：
+    - 用户=居士戒，问题提到"比丘戒" → 越界
+    - 用户=居士戒，问题提到"五戒" → 范围内（sub_role 在 hierarchy 中）
+    """
+    if not user_role or user_role == "未指定" or user_role == "不限":
+        return True
+    if not question_role or question_role == "通用":
+        return True
+    return question_role == user_role
 
 
 def detect_follow_up_topic(message: str, last_question: str) -> str:
@@ -200,6 +281,11 @@ def build_question_with_state(message: str, history: list, state: ConversationSt
     if new_role != state.current_role and new_role != "未指定":
         state.current_role = new_role
 
+    # 检测细分身份
+    new_sub_role = detect_sub_role(message, state.current_role)
+    if new_sub_role:
+        state.current_sub_role = new_sub_role
+
     # 检测话题切换
     if is_topic_switch(message):
         state.current_topic = message
@@ -232,7 +318,10 @@ def build_question_with_state(message: str, history: list, state: ConversationSt
         parts.append("【对话上下文】\n" + "\n".join(context_lines))
 
     if state.current_role and state.current_role != "未指定":
-        parts.append(f"【当前身份】{state.current_role}")
+        role_label = state.current_role
+        if state.current_sub_role:
+            role_label += f" · {state.current_sub_role}"
+        parts.append(f"【当前身份】{role_label}")
 
     if state.current_topic and state.current_topic != message:
         parts.append(f"【当前讨论主题】{state.current_topic}")

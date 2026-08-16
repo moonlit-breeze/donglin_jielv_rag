@@ -7,7 +7,7 @@ retriever.py — 语义检索模块
   1. 分层检索：根据身份只查询对应库，绝不会把比丘戒答给居士；
   2. 跨域拦截：metadata 过滤 domain="jielv"，防止非戒律问题得到牵强回答；
   3. 相关度阈值：过滤掉相似度不足的结果，避免硬凑答案；
-  4. 混合召回：语义检索 + 同义词扩展 + 关键词匹配 + RRF 重排，提高召回率；
+  4. 混合召回：语义检索 + 同义词扩展 + 倒排索引关键词匹配 + RRF 重排，提高召回率；
   5. Reranker 精排：使用 cross-encoder 对候选文档进行二次打分排序，提升检索相关性。
 
 【小白导读】—— 这是整个系统最核心、最复杂的文件！
@@ -16,13 +16,15 @@ retriever.py — 语义检索模块
   “用户问了一个问题，帮他在知识库里找到最相关的几条内容。”
 
   听起来简单，但要做好很难。本系统用了 5 层策略来提升检索质量：
+  其中关键词匹配层使用倒排索引加速，避免每次全量扫描文档。
 
   第 1 层：语义检索（Bi-encoder）
     - 把问题和知识库都转成向量，算相似度
     - 优点：能理解语义（“喝酒”和“饮酒”意思相近）
     - 缺点：有时不够精准
 
-  第 2 层：关键词匹配
+  第 2 层：关键词匹配（基于倒排索引）
+    - 预先建好「词 → 文档」的倒排索引，查询时直接命中，避免全量扫描
     - 直接看哪些文档包含了问题中的关键词
     - 作为语义检索的补充，解决“换个词就搜不到”的问题
 
@@ -283,58 +285,96 @@ def _expand_terms(question: str):
     return expanded
 
 
-def _keyword_search(question: str, role: str, k: int):
+# ============================================================
+# 倒排索引（关键词检索加速）
+# ============================================================
+# 什么是倒排索引？
+#   原方案：遍历所有文档，看每篇文档里有没有查询词（正排，O(N)）
+#   倒排索引：预先建好「词 → 包含该词的文档列表」映射，
+#             查询时直接查映射，跳过无关文档（倒排，O(命中数)）
+#
+# 类比：正排像「一本一本书翻目录」，倒排像「书末的索引页」——
+#       查"饮酒"这个词，索引页直接告诉你它出现在第 3、7、12 页。
+# ============================================================
+
+# 每个身份库各一份索引，懒加载构建，构建后缓存
+# _inverted_index: role -> {term: [doc_key, ...]}
+# _doc_registry:   role -> {doc_key: Document}，与索引平行，用于按 key 取回文档
+_inverted_index = {}
+_doc_registry = {}
+
+
+def _build_inverted_index(role: str):
     """
-    在指定身份库中进行关键词匹配召回，使用同义词扩展和命中次数评分。
-    当语义检索无结果或结果不足时使用，作为补充召回手段。
-
-    【小白提示】
-    这个函数做的是最朴素的检索方式：直接看文档里有没有包含关键词。
-    比如问“可以喝酒吗”，就看哪些文档里包含“喝酒”“饮酒”“酒戒”等词。
-
-    为什么还要有关键词检索？语义检索不够吗？
-    语义检索有时候会“漏掉”精确匹配的内容。
-    比如“居士可以喝酒吗”语义检索可能返回“不杀生”（因为向量相似），
-    但关键词检索能精准找到包含“酒”“饮酒”的文档。
-    两路互补，效果更好。
+    为指定身份库构建倒排索引（懒加载，只构建一次）。
 
     流程：
-    1. 提取关键词 + 同义词扩展
-    2. 遍历向量库中的所有文档
-    3. 对每个文档，看它包含了哪些关键词，累加权重
-    4. 按总分降序，取前 k 条
+      1. 从向量库拉取该身份的全部文档
+      2. 对每篇文档做 n-gram 提取（与查询侧 _extract_terms 完全对称）
+      3. 对每个词，记录它出现在哪些文档里
+      4. 结果缓存到 _inverted_index，下次查询直接复用
     """
-    terms = _expand_terms(question)
+    # 已经构建过，直接返回
+    if role in _inverted_index:
+        return
+
+    from langchain_core.documents import Document
+
+    db = _get_db(role)
+    data = db.get()
+    docs = data.get("documents", [])
+    metadatas = data.get("metadatas", [])
+
+    index = {}      # term -> [doc_key, ...]
+    registry = {}   # doc_key -> Document
+
+    for i, (doc_text, meta) in enumerate(zip(docs, metadatas)):
+        if not doc_text:
+            continue
+        doc = Document(page_content=doc_text, metadata=meta or {})
+        doc_key = i          # 用下标做 key，简单稳定
+        registry[doc_key] = doc
+
+        # 对文档做和查询侧一样的 n-gram 提取
+        # 注意：单字不进索引（查询侧也忽略单字），避免索引爆炸
+        for term in _extract_terms(doc_text):
+            if len(term) < 2:
+                continue
+            index.setdefault(term, []).append(doc_key)
+
+    _inverted_index[role] = index
+    _doc_registry[role] = registry
+
+
+def _keyword_search(question: str, role: str, k: int):
+    """
+    倒排索引版关键词检索。
+
+    与旧版的区别：
+      旧版：每次查询都全量拉取文档，逐条 for 循环做 `term in doc_text`
+      新版：先查倒排索引，直接拿到「包含该词的文档」，跳过无关文档
+    """
+    terms = _expand_terms(question)   # 提取查询词 + 同义词扩展
     if not terms:
         return []
 
-    try:
-        db = _get_db(role)
-        data = db.get()
-        docs = data.get("documents", [])
-        metadatas = data.get("metadatas", [])
-    except Exception:
-        return []
+    # 懒构建倒排索引（第一次用时构建，之后缓存）
+    _build_inverted_index(role)
 
-    scored = []
-    for doc_text, meta in zip(docs, metadatas):
-        if not doc_text:
+    index = _inverted_index.get(role, {})
+    registry = _doc_registry.get(role, {})
+
+    # 累加每个命中文档的得分
+    scored = {}   # doc_key -> 累计分数
+    for term, weight in terms.items():
+        if len(term) < 2:          # 单字忽略，与旧版一致
             continue
-        score = 0.0
-        for term, weight in terms.items():
-            # 忽略单字，避免过于宽泛的匹配
-            if len(term) < 2:
-                continue
-            if term in doc_text:
-                score += weight
-        if score > 0:
-            from langchain_core.documents import Document
-            scored.append((Document(page_content=doc_text, metadata=meta or {}), score))
+        for doc_key in index.get(term, []):   # 直接查映射，不再扫全部文档
+            scored[doc_key] = scored.get(doc_key, 0.0) + weight
 
-    # 按命中分数降序，取前 k
-    scored.sort(key=lambda x: x[1], reverse=True)
-    return [doc for doc, _ in scored[:k]]
-
+    # 按分数降序，取前 k；同分时按 doc_key 升序（等价于原文档顺序，保证稳定）
+    result = sorted(scored.items(), key=lambda kv: (-kv[1], kv[0]))
+    return [registry[doc_key] for doc_key, _ in result[:k]]
 
 def _rrf_fusion(rank_lists: list, k: int = 60):
     """
@@ -410,30 +450,60 @@ def _rerank_cache_key(question: str, role_filter: str, k: int) -> str:
     """生成缓存 key：基于问题+身份+条数的哈希。"""
     raw = f"{question}||{role_filter or 'ALL'}||{k}"
     return hashlib.md5(raw.encode()).hexdigest()
-    
-def retrieve(question: str, role_filter: str = None, k: int = 3, rerank: bool = False, rewrite: bool = False):
+
+
+def _filter_by_sub_role(docs, sub_role_filter: str):
+    """
+    按细分身份（sub_role）后过滤候选文档。
+
+    策略：
+      - 如果未指定 sub_role_filter，直接返回原文档
+      - 如果指定了，优先返回 sub_role 匹配的文档
+      - 若没有匹配的，保留 sub_role 为空的文档（兼容旧数据）
+      - 这样不会因为数据尚未标注 sub_role 而直接丢结果
+    """
+    if not sub_role_filter:
+        return docs
+
+    matched = []
+    fallback = []
+    for doc in docs:
+        doc_sub = str(doc.metadata.get("sub_role", "")).strip()
+        if doc_sub == sub_role_filter:
+            matched.append(doc)
+        elif not doc_sub:
+            fallback.append(doc)
+
+    # 有匹配则只返回匹配；否则返回未标注 sub_role 的文档
+    return matched if matched else fallback
+
+
+def retrieve(question: str, role_filter: str = None, sub_role_filter: str = None,
+             k: int = 3, rerank: bool = False, rewrite: bool = False):
     """
     检索与问题最相关的戒律文档。—— 这是整个系统的主检索入口！
 
     参数：
-      question:   用户的问题，如“居士可以喝酒吗”
-      role_filter: 身份过滤，“居士戒”/“沙弥戒”/“比丘戒”，None 表示全部检索
-      k:          返回结果数量，默认 3 条
-      rerank:     是否启用 Reranker 精排（cross-encoder 二次打分，提升相关性）
+      question:        用户的问题，如“居士可以喝酒吗”
+      role_filter:     身份过滤，“居士戒”/“沙弥戒”/“比丘戒”，None 表示全部检索
+      sub_role_filter: 细分身份过滤，如“五戒”/“菩萨戒·十重”，None 表示不过滤
+      k:               返回结果数量，默认 3 条
+      rerank:          是否启用 Reranker 精排（cross-encoder 二次打分，提升相关性）
     返回：
       List[Document]，按相关度降序
 
     【小白提示】完整流程：
       1. 确定搜哪些库（根据身份）
-      2. 每个库做两路召回（语义 + 关键词）
+      2. 每个库做两路召回（语义 + 倒排索引关键词）
       3. 融合两路结果
-      4. 可选：Reranker 精排
-      5. 截断 + 去重 → 返回
+      4. 可选：按 sub_role 做后过滤
+      5. 可选：Reranker 精排
+      6. 截断 + 去重 → 返回
     """
     # ============================================================
     # 检索缓存检查
     # ============================================================
-    cache_key = hashlib.md5(f"{question}||{role_filter or 'ALL'}||{k}||{rerank}".encode()).hexdigest()
+    cache_key = hashlib.md5(f"{question}||{role_filter or 'ALL'}||{sub_role_filter or 'ALL'}||{k}||{rerank}".encode()).hexdigest()
     now = _time.time()
     if cache_key in _retrieve_cache:
         ts, cached_docs = _retrieve_cache[cache_key]
@@ -492,7 +562,7 @@ def retrieve(question: str, role_filter: str = None, k: int = 3, rerank: bool = 
                     role_semantic.append(doc)
             semantic_results.extend(role_semantic)
 
-            # ----- 关键词检索 -----
+            # ----- 关键词检索（倒排索引）-----
             # 使用改写后的问题做关键词检索
             role_kw = _keyword_search(rewritten_question, role, k=search_k)
             keyword_results.extend(role_kw)
@@ -567,9 +637,12 @@ def retrieve(question: str, role_filter: str = None, k: int = 3, rerank: bool = 
         if len(_rerank_cache) > _RERANK_CACHE_MAX:
             _rerank_cache.popitem(last=False)  # 淘汰最旧的
 
-    # Step 5: 截断到最终 k 条
+    # Step 5: 按 sub_role 后过滤（如果指定了）
+    candidates = _filter_by_sub_role(candidates, sub_role_filter)
+
+    # Step 6: 截断到最终 k 条
     final_results = candidates[:k]
-    
+
     # 去重：同一段原文可能在多个身份库中重复存在（如“通用”内容）
     # 用 (内容, 出处) 作为去重 key
     seen = set()
@@ -592,7 +665,8 @@ def retrieve(question: str, role_filter: str = None, k: int = 3, rerank: bool = 
     return deduped
 
 
-def retrieve_with_scores(question: str, role_filter: str = None, k: int = 3, rerank: bool = False):
+def retrieve_with_scores(question: str, role_filter: str = None, sub_role_filter: str = None,
+                         k: int = 3, rerank: bool = False):
     """
     检索并返回 reranker 分数，用于对比实验。
 
@@ -637,6 +711,9 @@ def retrieve_with_scores(question: str, role_filter: str = None, k: int = 3, rer
         candidates = _rrf_fusion([semantic_results, keyword_results], k=60)
     else:
         candidates = keyword_results
+
+    # 按 sub_role 后过滤
+    candidates = _filter_by_sub_role(candidates, sub_role_filter)
 
     if not rerank:
         # 去重 + 截断

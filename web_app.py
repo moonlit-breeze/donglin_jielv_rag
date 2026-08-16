@@ -27,12 +27,21 @@ os.environ["TRANSFORMERS_OFFLINE"] = "1"
 os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
 
 import gradio as gr
+import re
 import time
 import os
 from rag.retriever import retrieve
 from rag.generator import generate, generate_stream, is_retrieval_relevant
 from rag.logger import log_qa, log_feedback
-from rag.conversation import ConversationState, build_question_with_state
+from rag.conversation import (
+    ConversationState,
+    build_question_with_state,
+    detect_role_switch,
+    detect_sub_role,
+    is_within_role_scope,
+    ROLE_HIERARCHY,
+)
+from rag.llm_client import AVAILABLE_PROVIDERS, DEFAULT_MODELS
 
 # 身份选项
 ROLE_OPTIONS = ["不限", "居士戒", "沙弥戒", "比丘戒"]
@@ -172,7 +181,11 @@ def _build_chat_history(history: list) -> list:
     return messages[-4:]  # 最多 4 条（2 轮）
 
 
-def respond(message: str, history: list, role: str, top_k: int, detail_level: str, json_mode: bool, rerank: bool, deep_think: bool, rewrite: bool, streaming: bool, access_token: str, state_dict: dict):
+def respond(message: str, history: list, role: str, sub_role: str,
+            provider_name: str, model_name: str,
+            top_k: int, detail_level: str, json_mode: bool, rerank: bool,
+            deep_think: bool, rewrite: bool, streaming: bool,
+            access_token: str, state_dict: dict):
     """
     Gradio ChatInterface 的回调函数（流式 + 非流式双模式）
 
@@ -213,11 +226,18 @@ def respond(message: str, history: list, role: str, top_k: int, detail_level: st
         return
 
     # 下拉框身份优先：下拉框是用户意图的权威来源
-    if role and role != "不限":
-        state.current_role = role
+    user_selected_role = role
+    if user_selected_role and user_selected_role != "不限":
+        state.current_role = user_selected_role
     else:
         # 用户选择"不限"时重置身份，避免残留旧身份
         state.current_role = "未指定"
+
+    # 下拉框细分身份：UI 选择优先，未选择时由问题自动检测
+    if sub_role and sub_role != "不限":
+        state.current_sub_role = sub_role
+    elif state.current_role != "未指定":
+        state.current_sub_role = detect_sub_role(message, state.current_role)
 
     # 调试日志：帮助排查身份切换问题
     if prev_role != state.current_role:
@@ -226,14 +246,23 @@ def respond(message: str, history: list, role: str, top_k: int, detail_level: st
     # 构造带状态感知的完整问题
     full_question = build_question_with_state(message, history, state)
 
+    # 越界检测：如果用户选择了具体身份，问题中提到其他身份则拒绝回答
+    if user_selected_role and user_selected_role != "不限":
+        question_role = detect_role_switch(message, user_selected_role)
+        if not is_within_role_scope(question_role, user_selected_role):
+            yield f"您当前选择身份为「{user_selected_role}」，此问题涉及「{question_role}」，超出该身份范围。请切换身份后再提问，或选择「不限」以通用模式咨询。"
+            _update_state(state, state_dict, message, "越界拒绝")
+            return
+
     # 身份过滤
     role_filter = None if state.current_role == "未指定" else state.current_role
+    sub_role_filter = state.current_sub_role or None
 
     # 多轮对话历史（传给 LLM 作为 messages）
     chat_history = _build_chat_history(history)
 
     # 检索
-    docs = retrieve(full_question, role_filter=role_filter, k=top_k, rerank=rerank, rewrite=rewrite)
+    docs = retrieve(full_question, role_filter=role_filter, sub_role_filter=sub_role_filter, k=top_k, rerank=rerank, rewrite=rewrite)
 
     # 空检索处理
     if not docs:
@@ -242,10 +271,14 @@ def respond(message: str, history: list, role: str, top_k: int, detail_level: st
             state.fallback_count += 1
             use_stream = streaming and not json_mode
             if use_stream:
-                for partial in generate_stream(full_question, [], role=state.current_role, detail_level=detail_level, json_mode=json_mode, deep_think=deep_think, chat_history=chat_history):
+                for partial in generate_stream(full_question, [], role=state.current_role, detail_level=detail_level,
+                                               json_mode=json_mode, deep_think=deep_think, chat_history=chat_history,
+                                               provider_name=provider_name, model=model_name):
                     yield partial + fallback_suffix
             else:
-                result = generate(full_question, [], role=state.current_role, detail_level=detail_level, json_mode=json_mode, deep_think=deep_think, chat_history=chat_history)
+                result = generate(full_question, [], role=state.current_role, detail_level=detail_level,
+                                  json_mode=json_mode, deep_think=deep_think, chat_history=chat_history,
+                                  provider_name=provider_name, model=model_name)
                 final_answer = _format_answer(result, json_mode) + fallback_suffix
                 yield final_answer
             log_qa(message, state.current_role, docs, "权威经典兜底")
@@ -262,30 +295,30 @@ def respond(message: str, history: list, role: str, top_k: int, detail_level: st
     if not show_sources:
         state.fallback_count += 1
 
-    # 检索到的原文（仅相关时展示）
-    sources_text = ""
-    if show_sources:
-        # 用 HTML <details> 做折叠，默认收起，用户可点击展开
-        sources_text = '\n\n---\n\n<details>\n<summary><strong>📚 检索到的原文（点击展开）</strong></summary>\n\n'
-        for i, doc in enumerate(docs):
-            meta = doc.metadata
-            sources_text += f"**[{i+1}] {meta.get('source','?')} · {meta.get('role','?')}**\n"
-            sources_text += f"> {doc.page_content[:200]}\n\n"
-        sources_text += '</details>'
+    # 检索到的原文延迟到生成后构建（需先提取置信度）
 
     # 生成
     # JSON 模式强制非流式：流式返回原始文本，无法做友好格式化
     use_stream = streaming and not json_mode
     if use_stream:
         # 流式输出：先逐 token yield 回答，最后再追加来源原文
-        for partial in generate_stream(full_question, docs, role=state.current_role, detail_level=detail_level, json_mode=json_mode, deep_think=deep_think, chat_history=chat_history):
+        for partial in generate_stream(full_question, docs, role=state.current_role, detail_level=detail_level,
+                                       json_mode=json_mode, deep_think=deep_think, chat_history=chat_history,
+                                       provider_name=provider_name, model=model_name):
             yield partial + fallback_suffix
-        # 流式结束后追加来源原文（只出现一次）
-        yield partial + fallback_suffix + sources_text
+        # 流式结束后：提取置信度 → 移入 sources 区域，避免重复展示
+        answer_text, confidence_label = _extract_confidence(partial)
+        sources_text = _build_sources_block(docs, confidence_label) if show_sources else ""
+        yield answer_text + fallback_suffix + sources_text
     else:
-        result = generate(full_question, docs, role=state.current_role, detail_level=detail_level, json_mode=json_mode, deep_think=deep_think, chat_history=chat_history)
-        final_answer = _format_answer(result, json_mode) + fallback_suffix + sources_text
-        yield final_answer
+        result = generate(full_question, docs, role=state.current_role, detail_level=detail_level,
+                          json_mode=json_mode, deep_think=deep_think, chat_history=chat_history,
+                          provider_name=provider_name, model=model_name)
+        answer_text = _format_answer(result, json_mode)
+        # 提取置信度 → 移入 sources 区域
+        answer_text, confidence_label = _extract_confidence(answer_text)
+        sources_text = _build_sources_block(docs, confidence_label) if show_sources else ""
+        yield answer_text + fallback_suffix + sources_text
 
     log_qa(message, state.current_role or role, docs, "已生成")
     _update_state(state, state_dict, message, "已生成")
@@ -312,6 +345,58 @@ def _format_answer(result, json_mode: bool) -> str:
     return str(result)
 
 
+# ============================================================
+# 来源展示辅助函数
+# ============================================================
+# 设计思路：
+#   1. 置信度原本由 generator.py 追加在回答末尾（*📊 置信度：...*）
+#   2. 这里把它从回答中提取出来，移入 sources 标题行内联展示
+#   3. 使用 <details> 实现折叠展开（默认折叠），但内部必须用
+#      纯 HTML 标签（<b>/<br>/<p>），不能混入 markdown 语法，
+#      否则 Gradio 6.x 的 markdown 渲染器会破坏 HTML 结构
+#   4. 回答与检索原文之间仅空一行（不用 --- 分割线）
+# ============================================================
+_CONFIDENCE_LINE_RE = re.compile(
+    r'\n*\*{0,2}📊\s*置信度[：:]([^*\n]*)\*{0,2}\s*$',
+    re.MULTILINE
+)
+
+
+def _extract_confidence(answer_text: str) -> tuple:
+    """从回答文本中提取置信度标签并移除，返回 (清理后文本, 置信度标签)。"""
+    match = _CONFIDENCE_LINE_RE.search(answer_text)
+    if match:
+        label = match.group(1).strip()
+        cleaned = _CONFIDENCE_LINE_RE.sub('', answer_text).rstrip()
+        return cleaned, label
+    return answer_text, ""
+
+
+def _build_sources_block(docs, confidence_label: str = "") -> str:
+    """
+    构建检索原文折叠块（<details> + 纯 HTML）。
+
+    - <details> 提供折叠/展开功能，默认折叠
+    - 内部全部使用纯 HTML 标签（<b>、<br>、<p>、<blockquote>），
+      不混入任何 markdown 语法，避免 Gradio 渲染异常
+    - 与回答正文之间仅空一行，不用 --- 分割线
+    """
+    conf_text = f" · {confidence_label}" if confidence_label else ""
+    # <details> 必须紧贴 <summary>，中间不能有空行
+    html = f'<details><summary><b>📚 检索到的原文（点击展开）{conf_text}</b></summary>'
+    for i, doc in enumerate(docs):
+        meta = doc.metadata
+        source = meta.get('source', '?')
+        role = meta.get('role', '?')
+        content = doc.page_content[:200]
+        # 纯 HTML 格式，不混入 markdown
+        html += f'<p><b>[{i+1}] {source} · {role}</b><br>'
+        html += f'<i>{content}</i></p>'
+    html += '</details>'
+    # \n\n 产生一个空行间距（不用 ---）
+    return '\n\n' + html
+
+
 def _update_state(state: ConversationState, state_dict: dict, question: str, answer: str):
     """把状态对象同步回 Gradio State（dict 形式）。"""
     state.last_question = question
@@ -326,6 +411,14 @@ def submit_feedback(question, answer, feedback, note):
         return "请先填写问题和回答再提交反馈。"
     log_feedback(question, answer, feedback, note)
     return "反馈已记录，感谢！"
+
+
+def _get_sub_role_choices(role: str):
+    """根据主身份返回细分身份下拉框选项。"""
+    if not role or role == "不限":
+        return ["不限"]
+    sub_roles = ROLE_HIERARCHY.get(role, [])
+    return ["不限"] + sub_roles
 
 
 # ---------- Gradio 多轮对话界面 ----------
@@ -352,6 +445,21 @@ with gr.Blocks(title="东林戒律RAG问答") as demo:
             label="身份",
             choices=ROLE_OPTIONS,
             value="不限"
+        )
+        sub_role_input = gr.Dropdown(
+            label="细分身份",
+            choices=["不限"],
+            value="不限"
+        )
+        provider_input = gr.Dropdown(
+            label="模型服务商",
+            choices=AVAILABLE_PROVIDERS,
+            value="deepseek"
+        )
+        model_input = gr.Textbox(
+            label="模型名称（留空使用默认）",
+            placeholder="如 deepseek-chat / gpt-4o-mini",
+            value=""
         )
         topk_input = gr.Slider(
             label="检索条数",
@@ -386,6 +494,13 @@ with gr.Blocks(title="东林戒律RAG问答") as demo:
             value=True
         )
 
+    # 身份切换时联动更新细分身份选项
+    role_input.change(
+        fn=lambda r: gr.update(choices=_get_sub_role_choices(r), value="不限"),
+        inputs=role_input,
+        outputs=sub_role_input
+    )
+
     conv_state = gr.State({})
     access_token_input = gr.Textbox(
         label="访问令牌（如已配置）",
@@ -396,10 +511,15 @@ with gr.Blocks(title="东林戒律RAG问答") as demo:
 
     chat_interface = gr.ChatInterface(
         fn=respond,
-        chatbot=gr.Chatbot(sanitize_html=False),  # 允许 <details> 等 HTML 标签渲染
-        additional_inputs=[role_input, topk_input, detail_input, json_mode_input, rerank_input, deep_think_input, rewrite_input, streaming_input, access_token_input, conv_state],
+        chatbot=gr.Chatbot(sanitize_html=False),  # 允许 <details> 折叠标签渲染
+        additional_inputs=[
+            role_input, sub_role_input, provider_input, model_input,
+            topk_input, detail_input, json_mode_input, rerank_input,
+            deep_think_input, rewrite_input, streaming_input,
+            access_token_input, conv_state
+        ],
         title="",
-        description="请输入您的戒律问题，支持多轮追问。",
+        description="请输入您的戒律问题，支持多轮追问。选择身份后可启用越界检测。",
     )
 
     # 反馈区域

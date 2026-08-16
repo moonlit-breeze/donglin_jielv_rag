@@ -31,15 +31,21 @@ load_dotenv()
 
 from rag.llm_client import create_provider, call_with_retry, stream_with_retry
 
-# 全局 LLM Provider（懒加载，首次调用时初始化）
-_provider = None
+# 全局 LLM Provider 缓存（按 provider+model 组合缓存，支持用户切换模型）
+_providers = {}
 
-def _get_provider():
-    """懒加载 LLM Provider。"""
-    global _provider
-    if _provider is None:
-        _provider = create_provider()
-    return _provider
+def _get_provider(provider_name: str = None, model: str = None):
+    """
+    懒加载 LLM Provider。
+
+    参数：
+      provider_name: 可选，指定 provider
+      model:         可选，指定模型名
+    """
+    key = f"{provider_name or 'env'}::{model or 'default'}"
+    if key not in _providers:
+        _providers[key] = create_provider(provider_name=provider_name, model=model)
+    return _providers[key]
 
 # ============================================================
 # 详细程度提示词
@@ -107,7 +113,7 @@ def _call_llm(system_prompt: str, user_msg: str, max_retries: int = 2,
             messages.append(msg)
     messages.append({"role": "user", "content": user_msg})
 
-    return call_with_retry(_get_provider(), messages, max_retries=max_retries)
+    return call_with_retry(_get_provider(provider_name=provider_name, model=model), messages, max_retries=max_retries)
 
 
 def _check_format(answer: str) -> bool:
@@ -315,18 +321,21 @@ def _try_parse_json(answer: str):
 
 def generate(question: str, docs, role: str = "", detail_level: str = "标准",
              json_mode: bool = False, deep_think: bool = False,
-             chat_history: List[Dict[str, str]] = None):
+             chat_history: List[Dict[str, str]] = None,
+             provider_name: str = None, model: str = None):
     """
     主生成函数：将检索结果 + 用户问题发给大模型，生成回答。
 
     参数：
-      question:     用户问题
-      docs:         检索到的文档列表
-      role:         用户身份（用于注入到 SYSTEM_PROMPT）
-      detail_level: 回答详细程度（简洁/标准/详细）
-      json_mode:    是否使用结构化 JSON 输出
-      deep_think:   是否启用深度思考（CoT）模式
-      chat_history: 多轮对话历史（Gradio messages 格式，可选）
+      question:      用户问题
+      docs:          检索到的文档列表
+      role:          用户身份（用于注入到 SYSTEM_PROMPT）
+      detail_level:  回答详细程度（简洁/标准/详细）
+      json_mode:     是否使用结构化 JSON 输出
+      deep_think:    是否启用深度思考（CoT）模式
+      chat_history:  多轮对话历史（Gradio messages 格式，可选）
+      provider_name: 可选，指定 LLM provider
+      model:         可选，指定模型名
     """
     # ============================================================
     # Step 1: 检索相关性检查
@@ -404,7 +413,8 @@ def generate(question: str, docs, role: str = "", detail_level: str = "标准",
 
 def generate_stream(question: str, docs, role: str = "", detail_level: str = "标准",
                     json_mode: bool = False, deep_think: bool = False,
-                    chat_history: List[Dict[str, str]] = None) -> Iterator[str]:
+                    chat_history: List[Dict[str, str]] = None,
+                    provider_name: str = None, model: str = None) -> Iterator[str]:
     """
     流式生成函数：逐 token 返回回答，用于 Web 实时展示。
 
@@ -446,7 +456,7 @@ def generate_stream(question: str, docs, role: str = "", detail_level: str = "�
     # Step 3: 流式调用 LLM
     accumulated = ""
     try:
-        for chunk in stream_with_retry(_get_provider(),
+        for chunk in stream_with_retry(_get_provider(provider_name=provider_name, model=model),
                                        [{"role": "system", "content": system_prompt}]
                                        + (chat_history or [])[-4:]
                                        + [{"role": "user", "content": user_msg}]):

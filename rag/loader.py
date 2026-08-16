@@ -11,6 +11,8 @@ loader.py — 知识库加载模块
     {
       "content": "不杀生戒的具体内容...",
       "role": "居士戒",           # 这条戒律属于哪个身份
+      "sub_role": "五戒",         # 细分身份（可选，如五戒/八关斋戒/菩萨戒·十重）
+      "domain": "jielv",          # 领域标识（jielv=戒律，以后可扩展）
       "source": "《增壹阿含经》",   # 出处
       "category": "性戒",         # 分类
       "severity": "根本戒"         # 等级
@@ -42,7 +44,7 @@ def load_knowledge_base(file_path: str = "data/knowledge_base.json"):
     返回：
       List[Document] —— 每个 Document 包含：
         - page_content: 戒律正文
-        - metadata: 元数据字典（role, domain, source, category, severity, index）
+        - metadata: 元数据字典（role, sub_role, domain, source, category, severity, index）
 
     【小白提示】
     Document 是 LangChain 的标准文档格式，你可以把它理解为一个“带标签的文本块”。
@@ -65,9 +67,13 @@ def load_knowledge_base(file_path: str = "data/knowledge_base.json"):
             metadata={
                 # role: 这条戒律属于哪个身份（居士戒 / 沙弥戒 / 比丘戒 / 通用）
                 "role": entry.get("role", "通用"),
-                # domain: 领域标记，所有条目统一标记为 "jielv"
+                # sub_role: 细分身份（如五戒 / 八关斋戒 / 菩萨戒·十重 / 菩萨戒·六重）
+                # 可选字段，为空时不影响检索
+                "sub_role": entry.get("sub_role", ""),
+                # domain: 领域标记，默认 "jielv"
+                # 优先读取 JSON 中的值，没有则回退到默认值
                 # 检索时用 filter={"domain": "jielv"} 来过滤，防止跨域
-                "domain": DOMAIN,
+                "domain": entry.get("domain", DOMAIN),
                 # source: 出处，如“《增壹阿含经》”
                 "source": entry.get("source", ""),
                 # category: 分类，如“性戒”“遮戒”

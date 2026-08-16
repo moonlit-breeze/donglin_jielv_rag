@@ -151,52 +151,62 @@ class SiliconFlowProvider(LLMProvider):
 
 
 # ============================================================
-# 工厂函数：根据环境变量自动选择 Provider
+# 工厂函数：根据环境变量或显式参数创建 Provider
 # ============================================================
+# 使用方式：
+#   1. 不传参数：按环境变量自动选择（向后兼容）
+#   2. 传 provider_name/model：由调用方（如 Web UI）指定模型
+#
 # 优先级：
-#   1. LLM_PROVIDER 显式指定
-#   2. SILICONFLOW_API_KEY → SiliconFlow
-#   3. OPENAI_API_KEY + OPENAI_BASE_URL → 通用 OpenAI
-#   4. DEEPSEEK_API_KEY → DeepSeek（默认）
+#   1. 函数参数 provider_name / model
+#   2. LLM_PROVIDER 环境变量
+#   3. SILICONFLOW_API_KEY → SiliconFlow
+#   4. OPENAI_API_KEY + OPENAI_BASE_URL → 通用 OpenAI
+#   5. DEEPSEEK_API_KEY → DeepSeek（默认）
 # ============================================================
 
-def create_provider() -> LLMProvider:
-    """根据环境变量创建 LLM Provider。"""
-    provider_name = os.getenv("LLM_PROVIDER", "").lower()
+# 供 UI 展示的 provider 选项
+AVAILABLE_PROVIDERS = ["deepseek", "openai", "siliconflow"]
 
-    if provider_name == "siliconflow":
+# 各 provider 的默认模型（用户未指定 model 时使用）
+DEFAULT_MODELS = {
+    "deepseek": "deepseek-chat",
+    "openai": "gpt-4o-mini",
+    "siliconflow": "deepseek-ai/DeepSeek-V3",
+}
+
+
+def create_provider(provider_name: str = None, model: str = None) -> LLMProvider:
+    """
+    创建 LLM Provider。
+
+    参数：
+      provider_name: 可选，指定 provider（deepseek/openai/siliconflow）
+      model:         可选，指定模型名；不传则使用对应 provider 的默认模型
+    """
+    name = (provider_name or os.getenv("LLM_PROVIDER", "")).lower()
+
+    if name == "siliconflow" or (not name and os.getenv("SILICONFLOW_API_KEY")):
         key = os.getenv("SILICONFLOW_API_KEY", "")
-        model = os.getenv("SILICONFLOW_MODEL", "deepseek-ai/DeepSeek-V3")
-        if key:
-            return SiliconFlowProvider(key, model=model)
-        raise ValueError("LLM_PROVIDER=siliconflow 但 SILICONFLOW_API_KEY 未设置")
+        if not key:
+            raise ValueError("使用 SiliconFlow 需要设置 SILICONFLOW_API_KEY")
+        selected_model = model or os.getenv("SILICONFLOW_MODEL", DEFAULT_MODELS["siliconflow"])
+        return SiliconFlowProvider(key, model=selected_model)
 
-    if provider_name == "openai":
+    if name == "openai" or (not name and os.getenv("OPENAI_API_KEY")):
         key = os.getenv("OPENAI_API_KEY", "")
+        if not key:
+            raise ValueError("使用 OpenAI 需要设置 OPENAI_API_KEY")
         url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-        model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-        if key:
-            return GenericOpenAIProvider(key, base_url=url, model=model)
-        raise ValueError("LLM_PROVIDER=openai 但 OPENAI_API_KEY 未设置")
+        selected_model = model or os.getenv("OPENAI_MODEL", DEFAULT_MODELS["openai"])
+        return GenericOpenAIProvider(key, base_url=url, model=selected_model)
 
-    if provider_name == "deepseek":
+    if name == "deepseek" or (not name and os.getenv("DEEPSEEK_API_KEY")):
         key = os.getenv("DEEPSEEK_API_KEY", "")
-        if key:
-            return DeepSeekProvider(key)
-        raise ValueError("LLM_PROVIDER=deepseek 但 DEEPSEEK_API_KEY 未设置")
-
-    # 自动探测：按优先级依次尝试
-    if os.getenv("SILICONFLOW_API_KEY"):
-        model = os.getenv("SILICONFLOW_MODEL", "deepseek-ai/DeepSeek-V3")
-        return SiliconFlowProvider(os.getenv("SILICONFLOW_API_KEY"), model=model)
-
-    if os.getenv("OPENAI_API_KEY"):
-        url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-        model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-        return GenericOpenAIProvider(os.getenv("OPENAI_API_KEY"), base_url=url, model=model)
-
-    if os.getenv("DEEPSEEK_API_KEY"):
-        return DeepSeekProvider(os.getenv("DEEPSEEK_API_KEY"))
+        if not key:
+            raise ValueError("使用 DeepSeek 需要设置 DEEPSEEK_API_KEY")
+        selected_model = model or os.getenv("DEEPSEEK_MODEL", DEFAULT_MODELS["deepseek"])
+        return DeepSeekProvider(key, model=selected_model)
 
     raise ValueError(
         "未找到任何 LLM API Key。请在 .env 中设置以下任一：\n"
