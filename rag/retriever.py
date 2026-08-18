@@ -52,6 +52,9 @@ os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 from rag.vector_store import load_vectorstore_for_role, ALL_ROLES
 from FlagEmbedding import FlagReranker
 import hashlib
+import logging
+
+logger = logging.getLogger(__name__)
 
 # ============================================================
 # 懒加载：按身份缓存向量数据库
@@ -90,6 +93,32 @@ _rerank_cache = OrderedDict()  # key: (question, role, k) → value: List[Docume
 _RETRIEVE_CACHE_MAX = 128
 _RETRIEVE_CACHE_TTL = 300  # 5 分钟
 _retrieve_cache = OrderedDict()  # key: hash → (timestamp, List[Document])
+
+
+def invalidate_retrieve_cache():
+    """清空检索结果缓存。
+
+    知识库重建后调用，避免 5 分钟 TTL 窗口内返回旧数据（脏读）。
+    """
+    _retrieve_cache.clear()
+
+
+def invalidate_rerank_cache():
+    """清空 Reranker 精排缓存。知识库重建后调用。"""
+    _rerank_cache.clear()
+
+
+def invalidate_all_caches():
+    """清空全部检索相关缓存（结果缓存 + 精排缓存 + 改写缓存 + 倒排索引）。
+
+    知识库重建后必须调用：倒排索引是懒构建的，知识库更新后
+    若不重建索引，关键词检索会命中旧数据。
+    """
+    invalidate_retrieve_cache()
+    invalidate_rerank_cache()
+    _rewrite_cache.clear()
+    _inverted_index.clear()
+    _doc_registry.clear()
 
 # ============================================================
 # 停用词集合
@@ -208,7 +237,8 @@ def _rewrite_query(question: str, role_filter: str = None) -> str:
             _rewrite_cache.popitem(last=False)
 
         return rewritten
-    except Exception:
+    except Exception as e:
+        logger.warning("Query 改写失败，回退原问题：%s（%s）", question, e)
         return question
 
 
@@ -216,6 +246,25 @@ def _rewrite_query(question: str, role_filter: str = None) -> str:
 # 实测：戒律相关问题 top1 分数 ≈ 0.55–0.67，无关问题 ≈ 0.45–0.53
 # 0.50 是一个经验值，正好在“相关”和“不相关”之间
 MIN_RELEVANCE = 0.50
+
+# 按身份差异化相关度阈值（默认与全局一致，可按需调优）
+# 不同身份的知识库内容密度不同，最优阈值可能不同；
+# 例如比丘戒库内容更密集，可适当提高阈值减少噪声。
+PER_ROLE_MIN_RELEVANCE = {
+    "比丘戒": MIN_RELEVANCE,
+    "沙弥戒": MIN_RELEVANCE,
+    "居士戒": MIN_RELEVANCE,
+}
+
+
+def _get_min_relevance(role: str) -> float:
+    """按身份取相关度阈值，未配置的身份回退到全局阈值。"""
+    return PER_ROLE_MIN_RELEVANCE.get(role, MIN_RELEVANCE)
+
+
+# Reranker 开启时的候选池大小（可配置）
+# 语义检索只取 k 条，但 Reranker 需要更多候选才能发挥精排优势
+SEARCH_K_RERANK = 10
 
 # Reranker 精排相关度阈值：低于此分数的结果不返回
 # Reranker 分数范围 [-∞, +∞]（normalize=True 后约 [0, 1]）
@@ -446,13 +495,17 @@ def _preload_reranker():
     _get_reranker()
 
 
-def _rerank_cache_key(question: str, role_filter: str, k: int) -> str:
-    """生成缓存 key：基于问题+身份+条数的哈希。"""
-    raw = f"{question}||{role_filter or 'ALL'}||{k}"
+def _rerank_cache_key(question: str, role_filter: str, sub_role_filter: str, k: int) -> str:
+    """生成缓存 key：基于问题+身份+细分身份+条数的哈希。
+
+    必须包含 sub_role_filter：否则不同细分身份的查询会共享同一份
+    精排缓存，导致 sub_role 过滤被跳过（真实 bug）。
+    """
+    raw = f"{question}||{role_filter or 'ALL'}||{sub_role_filter or 'ALL'}||{k}"
     return hashlib.md5(raw.encode()).hexdigest()
 
 
-def _filter_by_sub_role(docs, sub_role_filter: str):
+def _filter_by_sub_role(docs, sub_role_filter: str, k: int = None):
     """
     按细分身份（sub_role）后过滤候选文档。
 
@@ -460,7 +513,8 @@ def _filter_by_sub_role(docs, sub_role_filter: str):
       - 如果未指定 sub_role_filter，直接返回原文档
       - 如果指定了，优先返回 sub_role 匹配的文档
       - 若没有匹配的，保留 sub_role 为空的文档（兼容旧数据）
-      - 这样不会因为数据尚未标注 sub_role 而直接丢结果
+      - 匹配不足 k 条时，用未标注 sub_role 的文档补充到 k 条
+        （避免“有匹配就只返回匹配”导致结果不足 k 条）
     """
     if not sub_role_filter:
         return docs
@@ -474,8 +528,12 @@ def _filter_by_sub_role(docs, sub_role_filter: str):
         elif not doc_sub:
             fallback.append(doc)
 
-    # 有匹配则只返回匹配；否则返回未标注 sub_role 的文档
-    return matched if matched else fallback
+    if matched:
+        # 匹配不足 k 条时，用未标注 sub_role 的文档补充（匹配项保持在前）
+        if k is not None and len(matched) < k:
+            return matched + fallback[:k - len(matched)]
+        return matched
+    return fallback
 
 
 def retrieve(question: str, role_filter: str = None, sub_role_filter: str = None,
@@ -536,7 +594,7 @@ def retrieve(question: str, role_filter: str = None, sub_role_filter: str = None
     # 为什么？Reranker 比语义检索更精准，给它更多候选才能发挥优势。
     # 比如 k=3 时，语义检索只取 3 条，但 Reranker 会先取 10 条再精排选 3 条。
     # 优化：15→10，候选池依然充裕，但 Reranker 计算量减少 33%。
-    search_k = 10 if rerank else k
+    search_k = SEARCH_K_RERANK if rerank else k
 
     # 两路召回的结果分别存放
     semantic_results = []  # 语义检索结果（基于向量相似度）
@@ -550,15 +608,17 @@ def retrieve(question: str, role_filter: str = None, sub_role_filter: str = None
             results_with_scores = db.similarity_search_with_relevance_scores(
                 rewritten_question, k=search_k, filter=domain_filter
             )
-            # 阈值过滤：只保留相似度 >= MIN_RELEVANCE 的结果
+            # 阈值过滤：只保留相似度 >= 该身份阈值的结果
             # 为什么需要阈值？
             #   向量检索总会返回结果，即使完全不相关。
             #   比如问“今天天气”，库里最相似的可能只有 0.45 分，
             #   远低于正常问题的 0.55-0.67 分。
             #   阈值 0.50 就是用来过滤这种“硬凑”的结果。
+            #   不同身份库内容密度不同，可用 PER_ROLE_MIN_RELEVANCE 差异化调优。
+            role_min_rel = _get_min_relevance(role)
             role_semantic = []
             for doc, score in results_with_scores:
-                if score >= MIN_RELEVANCE:
+                if score >= role_min_rel:
                     role_semantic.append(doc)
             semantic_results.extend(role_semantic)
 
@@ -566,8 +626,9 @@ def retrieve(question: str, role_filter: str = None, sub_role_filter: str = None
             # 使用改写后的问题做关键词检索
             role_kw = _keyword_search(rewritten_question, role, k=search_k)
             keyword_results.extend(role_kw)
-        except Exception:
+        except Exception as e:
             # 某个身份的库不存在（尚未初始化），跳过
+            logger.warning("身份库 %s 检索失败，跳过：%s", role, e)
             continue
 
     # Step 3: 融合策略
@@ -598,12 +659,15 @@ def retrieve(question: str, role_filter: str = None, sub_role_filter: str = None
 
     # --- Reranker 精排核心逻辑 ---
     if rerank and candidates:
-        # 先查缓存：相同问题 + 身份 + k 的结果直接返回
-        cache_key = _rerank_cache_key(question, role_filter, k)
+        # 先查缓存：相同问题 + 身份 + 细分身份 + k 的结果直接返回
+        cache_key = _rerank_cache_key(question, role_filter, sub_role_filter, k)
         if cache_key in _rerank_cache:
             _rerank_cache.move_to_end(cache_key)  # LRU 标记为最近使用
             cached = _rerank_cache[cache_key]
-            # 缓存命中，直接走去重返回
+            # 缓存命中：仍需按 sub_role 过滤（缓存 key 已含 sub_role，
+            # 但为兼容旧缓存数据，这里再过滤一次更稳妥）
+            cached = _filter_by_sub_role(cached, sub_role_filter, k)
+            # 先去重，再截断
             seen = set()
             deduped = []
             for doc in cached[:k]:
@@ -638,7 +702,7 @@ def retrieve(question: str, role_filter: str = None, sub_role_filter: str = None
             _rerank_cache.popitem(last=False)  # 淘汰最旧的
 
     # Step 5: 按 sub_role 后过滤（如果指定了）
-    candidates = _filter_by_sub_role(candidates, sub_role_filter)
+    candidates = _filter_by_sub_role(candidates, sub_role_filter, k)
 
     # Step 6: 先去重，再截断到最终 k 条
     # 去重：同一段原文可能在多个身份库中重复存在（如“通用”内容）
@@ -691,7 +755,7 @@ def retrieve_with_scores(question: str, role_filter: str = None, sub_role_filter
     else:
         roles_to_search = ALL_ROLES
 
-    search_k = 10 if rerank else k
+    search_k = SEARCH_K_RERANK if rerank else k
     semantic_results = []
     keyword_results = []
 
@@ -701,11 +765,13 @@ def retrieve_with_scores(question: str, role_filter: str = None, sub_role_filter
             results_with_scores = db.similarity_search_with_relevance_scores(
                 question, k=search_k, filter=domain_filter
             )
+            role_min_rel = _get_min_relevance(role)
             for doc, score in results_with_scores:
-                if score >= MIN_RELEVANCE:
+                if score >= role_min_rel:
                     semantic_results.append(doc)
             keyword_results.extend(_keyword_search(question, role, k=search_k))
-        except Exception:
+        except Exception as e:
+            logger.warning("身份库 %s 检索失败，跳过：%s", role, e)
             continue
 
     min_semantic_needed = max(1, search_k // 2)
@@ -717,7 +783,7 @@ def retrieve_with_scores(question: str, role_filter: str = None, sub_role_filter
         candidates = keyword_results
 
     # 按 sub_role 后过滤
-    candidates = _filter_by_sub_role(candidates, sub_role_filter)
+    candidates = _filter_by_sub_role(candidates, sub_role_filter, k)
 
     if not rerank:
         # 先去重，再截断（与 retrieve() 保持一致）

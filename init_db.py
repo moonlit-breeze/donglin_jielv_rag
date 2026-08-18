@@ -29,6 +29,7 @@ os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
 from rag.loader import load_knowledge_base
 from rag.vector_store import create_vectorstore_for_role, ROLE_DB_MAP
+from rag.retriever import invalidate_all_caches
 
 if __name__ == "__main__":
     # Step 1: 加载知识库
@@ -59,6 +60,10 @@ if __name__ == "__main__":
             create_vectorstore_for_role(role, role_docs)
         else:
             print(f"跳过未知身份「{role}」，不在 ROLE_DB_MAP 中")
+
+    # 知识库已重建，清空检索缓存，避免旧数据脏读
+    invalidate_all_caches()
+    print("已清空检索缓存（结果缓存/精排缓存/改写缓存/倒排索引）")
 
     # 完成，打印汇总信息
     print("\n向量库创建完成！")

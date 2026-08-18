@@ -42,6 +42,7 @@ from pathlib import Path
 from rag.pdf_loader import load_pdf_to_json, save_json_data, load_json_data, validate_records
 from rag.loader import load_knowledge_base
 from rag.vector_store import create_vectorstore_for_role, ROLE_DB_MAP
+from rag.retriever import invalidate_all_caches
 
 # 知识库 JSON 输出路径
 KNOWLEDGE_BASE_PATH = Path("data/knowledge_base.json")
@@ -388,6 +389,10 @@ def main():
             create_vectorstore_for_role(role, role_docs)
         else:
             print(f"  跳过未知身份「{role}」，不在 ROLE_DB_MAP 中")
+
+    # 知识库已重建，清空检索缓存，避免旧数据脏读
+    invalidate_all_caches()
+    print("已清空检索缓存（结果缓存/精排缓存/改写缓存/倒排索引）")
 
     # ── 完成 ──
     print("\n" + "=" * 40)
