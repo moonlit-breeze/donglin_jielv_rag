@@ -41,7 +41,7 @@ from rag.conversation import (
     is_within_role_scope,
     ROLE_HIERARCHY,
 )
-from rag.llm_client import AVAILABLE_PROVIDERS, DEFAULT_MODELS
+from rag.llm_client import AVAILABLE_PROVIDERS, DEFAULT_MODELS, MODEL_CHOICES
 
 # 身份选项
 ROLE_OPTIONS = ["不限", "居士戒", "沙弥戒", "比丘戒"]
@@ -456,10 +456,10 @@ with gr.Blocks(title="东林戒律RAG问答") as demo:
             choices=AVAILABLE_PROVIDERS,
             value="deepseek"
         )
-        model_input = gr.Textbox(
-            label="模型名称（留空使用默认）",
-            placeholder="如 deepseek-chat / gpt-4o-mini",
-            value=""
+        model_input = gr.Dropdown(
+            label="模型",
+            choices=MODEL_CHOICES["deepseek"],
+            value=DEFAULT_MODELS["deepseek"]
         )
         topk_input = gr.Slider(
             label="检索条数",
@@ -499,6 +499,13 @@ with gr.Blocks(title="东林戒律RAG问答") as demo:
         fn=lambda r: gr.update(choices=_get_sub_role_choices(r), value="不限"),
         inputs=role_input,
         outputs=sub_role_input
+    )
+
+    # 服务商切换时联动更新模型选项
+    provider_input.change(
+        fn=lambda p: gr.update(choices=MODEL_CHOICES.get(p, []), value=DEFAULT_MODELS.get(p)),
+        inputs=provider_input,
+        outputs=model_input
     )
 
     conv_state = gr.State({})

@@ -96,7 +96,8 @@ JSON_SYSTEM_PROMPT = """你是一位严谨的佛教戒律助手，仅回答与�
 
 
 def _call_llm(system_prompt: str, user_msg: str, max_retries: int = 2,
-              chat_history: List[Dict[str, str]] = None):
+              chat_history: List[Dict[str, str]] = None,
+              provider_name: str = None, model: str = None):
     """
     调用 LLM，支持多轮对话历史注入。
 
@@ -369,7 +370,8 @@ def generate(question: str, docs, role: str = "", detail_level: str = "标准",
     if json_mode:
         system_prompt = JSON_SYSTEM_PROMPT.format(role=role or "未指定")
         user_msg = f"用户身份：{role or '未指定'}\n\n参考资料：\n{context}\n{fallback_note}\n\n问题：{question}"
-        answer = _call_llm(system_prompt, user_msg, chat_history=chat_history)
+        answer = _call_llm(system_prompt, user_msg, chat_history=chat_history,
+                           provider_name=provider_name, model=model)
         parsed = _try_parse_json(answer)
         if parsed:
             return parsed
@@ -385,7 +387,8 @@ def generate(question: str, docs, role: str = "", detail_level: str = "标准",
     system_prompt += f"\n\n【回答详细程度要求】\n{detail_note}"
     user_msg = f"用户身份：{role or '未指定'}\n\n参考资料：\n{context}\n{fallback_note}\n\n问题：{question}"
 
-    answer = _call_llm(system_prompt, user_msg, chat_history=chat_history)
+    answer = _call_llm(system_prompt, user_msg, chat_history=chat_history,
+                       provider_name=provider_name, model=model)
 
     # ============================================================
     # Step 4: 格式校验
@@ -401,7 +404,8 @@ def generate(question: str, docs, role: str = "", detail_level: str = "标准",
         has_format = _check_format(answer)
     if not has_format:
         correction_prompt = system_prompt + "\n\n注意：上次回答格式不完整，必须包含【答】和【依据】两个部分。"
-        answer = _call_llm(correction_prompt, user_msg, chat_history=chat_history)
+        answer = _call_llm(correction_prompt, user_msg, chat_history=chat_history,
+                           provider_name=provider_name, model=model)
 
     # ============================================================
     # Step 5: 追加置信度标识并返回

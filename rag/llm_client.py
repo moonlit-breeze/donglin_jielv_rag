@@ -175,6 +175,13 @@ DEFAULT_MODELS = {
     "siliconflow": "deepseek-ai/DeepSeek-V3",
 }
 
+# 各 provider 可选模型列表（供 Web UI 下拉选择，第一个为默认模型）
+MODEL_CHOICES = {
+    "deepseek": ["deepseek-chat", "deepseek-reasoner"],
+    "openai": ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1"],
+    "siliconflow": ["deepseek-ai/DeepSeek-V3", "deepseek-ai/DeepSeek-R1", "Qwen/Qwen2.5-72B-Instruct"],
+}
+
 
 def create_provider(provider_name: str = None, model: str = None) -> LLMProvider:
     """
