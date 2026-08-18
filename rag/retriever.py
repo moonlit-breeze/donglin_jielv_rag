@@ -640,20 +640,24 @@ def retrieve(question: str, role_filter: str = None, sub_role_filter: str = None
     # Step 5: 按 sub_role 后过滤（如果指定了）
     candidates = _filter_by_sub_role(candidates, sub_role_filter)
 
-    # Step 6: 截断到最终 k 条
-    final_results = candidates[:k]
-
+    # Step 6: 先去重，再截断到最终 k 条
     # 去重：同一段原文可能在多个身份库中重复存在（如“通用”内容）
     # 用 (内容, 出处) 作为去重 key
+    # 为什么先去重再截断？
+    #   若先截断 top-k 再去重，top-k 内出现重复时结果会不足 k 条；
+    #   先对完整候选池去重（保留精排分数靠前的重复项），再截断，
+    #   既能保证返回条数充足，又不影响精排排序质量。
     seen = set()
     deduped = []
-    for doc in final_results:
+    for doc in candidates:
         content = doc.page_content or ""
         source = str(doc.metadata.get("source", ""))
         key = (content.strip(), source.strip())
         if key not in seen:
             seen.add(key)
             deduped.append(doc)
+
+    final_results = deduped[:k]
 
     # ============================================================
     # 写入检索缓存
@@ -716,15 +720,16 @@ def retrieve_with_scores(question: str, role_filter: str = None, sub_role_filter
     candidates = _filter_by_sub_role(candidates, sub_role_filter)
 
     if not rerank:
-        # 去重 + 截断
+        # 先去重，再截断（与 retrieve() 保持一致）
+        # 先对完整候选池去重，再截断到 k 条，避免 top-k 内重复导致结果不足 k 条
         seen = set()
         deduped = []
-        for doc in candidates[:k]:
+        for doc in candidates:
             key = (doc.page_content.strip(), str(doc.metadata.get("source", "")).strip())
             if key not in seen:
                 seen.add(key)
                 deduped.append(doc)
-        return deduped, None
+        return deduped[:k], None
 
     # Reranker 精排（与 retrieve() 相同的优化）
     _MAX_RERANK_INPUT_WS = 15
